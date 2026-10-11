@@ -11,20 +11,38 @@ class LunchflowItemTest < ActiveSupport::TestCase
     assert_equal LunchflowItem::DEFAULT_BASE_URL, @lunchflow_item.effective_base_url
   end
 
-  test "effective_base_url returns default for non-lunchflow host" do
-    @lunchflow_item.base_url = "https://169.254.169.254/latest/meta-data"
+  test "effective_base_url returns a custom https url" do
+    @lunchflow_item.base_url = "https://lunchflow.example.com/api/v1"
+
+    assert_equal "https://lunchflow.example.com/api/v1", @lunchflow_item.effective_base_url
+  end
+
+  test "effective_base_url returns a custom http url with a port" do
+    @lunchflow_item.base_url = "http://bank-scraper:8585/api/lunchflow"
+
+    assert_equal "http://bank-scraper:8585/api/lunchflow", @lunchflow_item.effective_base_url
+  end
+
+  test "effective_base_url strips surrounding whitespace and the trailing slash" do
+    @lunchflow_item.base_url = " https://lunchflow.app/api/v1/ "
+
+    assert_equal "https://lunchflow.app/api/v1", @lunchflow_item.effective_base_url
+  end
+
+  test "effective_base_url returns default for non-http scheme" do
+    @lunchflow_item.base_url = "ftp://lunchflow.app/api/v1"
 
     assert_equal LunchflowItem::DEFAULT_BASE_URL, @lunchflow_item.effective_base_url
   end
 
-  test "effective_base_url returns default for non-https scheme" do
-    @lunchflow_item.base_url = "http://lunchflow.app/api/v1"
+  test "effective_base_url returns default for a url without a host" do
+    @lunchflow_item.base_url = "lunchflow.app/api/v1"
 
     assert_equal LunchflowItem::DEFAULT_BASE_URL, @lunchflow_item.effective_base_url
   end
 
-  test "effective_base_url returns canonical default for valid lunchflow url" do
-    @lunchflow_item.base_url = "https://lunchflow.app/api/v1/"
+  test "effective_base_url returns default for an unparsable url" do
+    @lunchflow_item.base_url = "http://bank scraper:8585"
 
     assert_equal LunchflowItem::DEFAULT_BASE_URL, @lunchflow_item.effective_base_url
   end
