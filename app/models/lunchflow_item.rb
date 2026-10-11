@@ -158,14 +158,11 @@ class LunchflowItem < ApplicationRecord
   def effective_base_url
     return DEFAULT_BASE_URL if base_url.blank?
 
-    uri = URI.parse(base_url)
-    return DEFAULT_BASE_URL unless uri.is_a?(URI::HTTPS)
-    return DEFAULT_BASE_URL unless uri.host == "lunchflow.app"
-    return DEFAULT_BASE_URL unless [ "", "/", "/api/v1", "/api/v1/" ].include?(uri.path)
-    return DEFAULT_BASE_URL unless uri.query.blank?
-    return DEFAULT_BASE_URL unless uri.fragment.blank?
+    uri = URI.parse(base_url.strip)
+    return DEFAULT_BASE_URL unless uri.is_a?(URI::HTTP) && uri.host.present?
 
-    DEFAULT_BASE_URL
+    # Provider::Lunchflow appends paths that start with a slash
+    uri.to_s.chomp("/")
   rescue URI::InvalidURIError
     DEFAULT_BASE_URL
   end
