@@ -4,9 +4,11 @@
 #   custom/current         default branch; points at the release branch in use
 #
 # Flow:
-#   - Daily: when upstream has a new stable release, rebase custom/current onto it
-#     as custom/<tag> and push. A conflict opens an issue instead.
-#   - Push to custom/<tag>: run CI, then move custom/current to it.
+#   - Daily: when upstream has a new stable release, save custom/current as the
+#     branch of the release it is on, then rebase it onto the new release as
+#     custom/<tag> and push. A conflict opens an issue instead.
+#   - Push to custom/<tag> of a newer release than custom/current is on: run CI,
+#     then move custom/current to it. Any other push to custom/<tag> does nothing.
 #   - Push to custom/current: run CI, then publish the Docker image.
 #
 # Requires the SYNC_TOKEN secret: a token that may push to this repository,
@@ -78,6 +80,11 @@ jobs:
           base="$(git describe --tags --abbrev=0 --match 'v*' --exclude '*-alpha*' --exclude '*-beta*' --exclude '*-rc*')"
           echo "Rebasing custom/current from ${base} onto ${latest}"
 
+          # custom/current is about to leave this release, and commits made on it since the
+          # last sync are on no other branch. Not forced: if the branch has commits that
+          # custom/current lacks, the run fails instead of dropping them.
+          git push "https://x-access-token:${SYNC_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/custom/${base}"
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout --quiet -b "$branch"
@@ -111,6 +118,7 @@ jobs:
           \`\`\`sh
           git fetch https://github.com/${UPSTREAM_REPO}.git tag ${latest}
           git fetch https://github.com/${GITHUB_REPOSITORY}.git custom/current
+          git push https://github.com/${GITHUB_REPOSITORY}.git FETCH_HEAD:refs/heads/custom/${base}
           git checkout -b ${branch} FETCH_HEAD
           git rebase --onto ${latest} ${base}
           # fix the conflicts, then: git add <files> && git rebase --continue
@@ -129,6 +137,7 @@ jobs:
     outputs:
       base_tag: ${{ steps.state.outputs.base_tag }}
       pointer_sha: ${{ steps.state.outputs.pointer_sha }}
+      promotable: ${{ steps.state.outputs.promotable }}
       image: ${{ steps.state.outputs.image }}
 
     steps:
@@ -138,24 +147,42 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Read the upstream base tag and the custom/current commit
+      - name: Read the upstream base tags and the custom/current commit
         id: state
         shell: bash
         run: |
           set -euo pipefail
 
+          describe_base() {
+            git describe --tags --abbrev=0 --match 'v*' --exclude '*-alpha*' --exclude '*-beta*' --exclude '*-rc*' "$1"
+          }
+
           git fetch --quiet --no-tags "https://github.com/${UPSTREAM_REPO}.git" 'refs/tags/v*:refs/tags/v*'
-          base_tag="$(git describe --tags --abbrev=0 --match 'v*' --exclude '*-alpha*' --exclude '*-beta*' --exclude '*-rc*')"
-          pointer_sha="$(git ls-remote origin refs/heads/custom/current | cut -f1)"
+          git fetch --quiet --no-tags origin custom/current
+          pointer_sha="$(git rev-parse FETCH_HEAD)"
+          base_tag="$(describe_base HEAD)"
+          pointer_base_tag="$(describe_base "$pointer_sha")"
+
+          # A release branch is promoted only when it moves custom/current to a newer release.
+          # The sync job also pushes custom/current to the branch of the release it leaves,
+          # and that push must not bring custom/current back.
+          promotable=false
+          if [[ "$GITHUB_REF" == refs/heads/custom/v* && "$base_tag" != "$pointer_base_tag" \
+            && "$(printf '%s\n' "$base_tag" "$pointer_base_tag" | sort --version-sort | tail -n 1)" == "$base_tag" ]]; then
+            promotable=true
+          fi
+          echo "This branch is on ${base_tag}, custom/current is on ${pointer_base_tag}: promotable=${promotable}"
 
           {
             echo "base_tag=${base_tag}"
             echo "pointer_sha=${pointer_sha}"
+            echo "promotable=${promotable}"
             # Docker rejects uppercase image names, and the repository owner may have some.
             echo "image=${REGISTRY}/${GITHUB_REPOSITORY,,}"
           } >> "$GITHUB_OUTPUT"
 
   ci:
+    if: github.ref == 'refs/heads/custom/current' || needs.prepare.outputs.promotable == 'true'
     needs: [prepare]
     uses: ./.github/workflows/ci.yml
     with:
@@ -163,7 +190,7 @@ jobs:
 
   promote:
     name: Point custom/current at this release branch
-    if: startsWith(github.ref, 'refs/heads/custom/v')
+    if: needs.prepare.outputs.promotable == 'true'
     needs: [prepare, ci]
     runs-on: ubuntu-latest
     timeout-minutes: 10
