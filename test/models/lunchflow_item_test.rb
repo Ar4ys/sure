@@ -47,6 +47,17 @@ class LunchflowItemTest < ActiveSupport::TestCase
     assert_equal LunchflowItem::DEFAULT_BASE_URL, @lunchflow_item.effective_base_url
   end
 
+  test "custom_base_url? is true only for a url other than the default" do
+    @lunchflow_item.base_url = "http://bank-scraper:8585/api/lunchflow"
+    assert @lunchflow_item.custom_base_url?
+
+    @lunchflow_item.base_url = "https://lunchflow.app/api/v1/"
+    assert_not @lunchflow_item.custom_base_url?
+
+    @lunchflow_item.base_url = nil
+    assert_not @lunchflow_item.custom_base_url?
+  end
+
   test "sync status summary covers every German count branch" do
     assert_sync_status(:de, total: 0, linked: 0, unlinked: 0, expected: "Keine Konten gefunden")
     assert_sync_status(:de, total: 1, linked: 1, unlinked: 0, expected: "1 Konto synchronisiert")

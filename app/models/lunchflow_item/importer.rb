@@ -499,6 +499,10 @@ class LunchflowItem::Importer
     end
 
     def determine_sync_start_date(lunchflow_account)
+      # A self-hosted Lunch Flow API has no rate limit to protect, and fetching everything lets
+      # changes to old transactions reach us. The windows below only suit lunchflow.app.
+      return Time.at(0).utc if lunchflow_item.custom_base_url?
+
       # Check if this account has any stored transactions
       # If not, treat it as a first sync for this account even if the item has been synced before
       has_stored_transactions = lunchflow_account.raw_transactions_payload.to_a.any?
