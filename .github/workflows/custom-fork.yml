@@ -1,0 +1,349 @@
+# Keeps this fork on the latest stable upstream release with its own commits on top.
+#
+#   custom/<upstream-tag>  upstream release tag + the fork's commits, one branch per release
+#   custom/current         default branch; points at the release branch in use
+#
+# Flow:
+#   - Daily: when upstream has a new stable release, rebase custom/current onto it
+#     as custom/<tag> and push. A conflict opens an issue instead.
+#   - Push to custom/<tag>: run CI, then move custom/current to it.
+#   - Push to custom/current: run CI, then publish the Docker image.
+#
+# Requires the SYNC_TOKEN secret: a token that may push to this repository,
+# including changes under .github/workflows.
+
+name: Custom fork
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '43 4 * * *'
+  push:
+    branches:
+      - custom/current
+      - 'custom/v*'
+
+env:
+  UPSTREAM_REPO: we-promise/sure
+  REGISTRY: ghcr.io
+
+permissions:
+  contents: read
+
+concurrency:
+  group: custom-fork-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Rebase onto the latest upstream release
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Check out custom/current
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: custom/current
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Rebase onto the latest upstream release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          git fetch --quiet --no-tags "https://github.com/${UPSTREAM_REPO}.git" 'refs/tags/v*:refs/tags/v*'
+          latest="$(gh api "repos/${UPSTREAM_REPO}/releases/latest" --jq .tag_name)"
+
+          if git merge-base --is-ancestor "$latest" HEAD; then
+            echo "custom/current is already based on ${latest}."
+            exit 0
+          fi
+
+          branch="custom/${latest}"
+          if git ls-remote --exit-code --heads origin "$branch" > /dev/null; then
+            echo "${branch} already exists and has not been promoted yet; nothing to do."
+            exit 0
+          fi
+
+          base="$(git describe --tags --abbrev=0 --match 'v*' --exclude '*-alpha*' --exclude '*-beta*' --exclude '*-rc*')"
+          echo "Rebasing custom/current from ${base} onto ${latest}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout --quiet -b "$branch"
+
+          if git rebase --onto "$latest" "$base"; then
+            git push "https://x-access-token:${SYNC_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "$branch"
+            exit 0
+          fi
+
+          conflicts="$(git diff --name-only --diff-filter=U | sed 's/^/- /')"
+          stopped_at="$(git log -1 --format='%h %s' REBASE_HEAD)"
+          git rebase --abort
+
+          title="Upstream sync: ${latest} conflicts with custom changes"
+          if gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 200 --json title \
+            | jq --exit-status --arg title "$title" 'any(.[]; .title == $title)' > /dev/null; then
+            echo "An issue for ${latest} is already open."
+            exit 0
+          fi
+
+          gh issue create --repo "$GITHUB_REPOSITORY" --assignee "$GITHUB_REPOSITORY_OWNER" --title "$title" --body-file - <<EOF
+          Upstream released \`${latest}\`, and rebasing \`custom/current\` from \`${base}\` onto it stopped with conflicts. \`custom/current\` was left unchanged.
+
+          Stopped at commit: \`${stopped_at}\`
+
+          Conflicting files in that commit:
+          ${conflicts}
+
+          To resolve:
+
+          \`\`\`sh
+          git fetch https://github.com/${UPSTREAM_REPO}.git tag ${latest}
+          git fetch https://github.com/${GITHUB_REPOSITORY}.git custom/current
+          git checkout -b ${branch} FETCH_HEAD
+          git rebase --onto ${latest} ${base}
+          # fix the conflicts, then: git add <files> && git rebase --continue
+          git push https://github.com/${GITHUB_REPOSITORY}.git ${branch}
+          \`\`\`
+
+          Pushing \`${branch}\` runs CI and, when it passes, moves \`custom/current\` to it.
+          EOF
+
+  prepare:
+    name: Read branch state
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    outputs:
+      base_tag: ${{ steps.state.outputs.base_tag }}
+      pointer_sha: ${{ steps.state.outputs.pointer_sha }}
+      image: ${{ steps.state.outputs.image }}
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Read the upstream base tag and the custom/current commit
+        id: state
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git fetch --quiet --no-tags "https://github.com/${UPSTREAM_REPO}.git" 'refs/tags/v*:refs/tags/v*'
+          base_tag="$(git describe --tags --abbrev=0 --match 'v*' --exclude '*-alpha*' --exclude '*-beta*' --exclude '*-rc*')"
+          pointer_sha="$(git ls-remote origin refs/heads/custom/current | cut -f1)"
+
+          {
+            echo "base_tag=${base_tag}"
+            echo "pointer_sha=${pointer_sha}"
+            # Docker rejects uppercase image names, and the repository owner may have some.
+            echo "image=${REGISTRY}/${GITHUB_REPOSITORY,,}"
+          } >> "$GITHUB_OUTPUT"
+
+  ci:
+    needs: [prepare]
+    uses: ./.github/workflows/ci.yml
+    with:
+      require_js_dependency_audit: false
+
+  promote:
+    name: Point custom/current at this release branch
+    if: startsWith(github.ref, 'refs/heads/custom/v')
+    needs: [prepare, ci]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Move custom/current
+        shell: bash
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+          POINTER_SHA: ${{ needs.prepare.outputs.pointer_sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$POINTER_SHA" == "$GITHUB_SHA" ]]; then
+            echo "custom/current already points at ${GITHUB_SHA}."
+            exit 0
+          fi
+
+          # The lease is the commit custom/current had before CI started: commits
+          # pushed to it since then are not in this branch and would be dropped.
+          git push "https://x-access-token:${SYNC_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "${GITHUB_SHA}:refs/heads/custom/current" \
+            --force-with-lease="refs/heads/custom/current:${POINTER_SHA}"
+
+  build:
+    name: Build Docker image
+    if: github.ref == 'refs/heads/custom/current'
+    needs: [prepare, ci]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [amd64, arm64]
+        include:
+          - platform: amd64
+            runs-on: ubuntu-24.04
+          - platform: arm64
+            runs-on: ubuntu-24.04-arm
+
+    timeout-minutes: 60
+    runs-on: ${{ matrix.runs-on }}
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Log in to the container registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish 'linux/${{ matrix.platform }}' image by digest
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        id: build
+        with:
+          context: .
+          build-args: BUILD_COMMIT_SHA=${{ github.sha }}
+          platforms: 'linux/${{ matrix.platform }}'
+          cache-from: type=registry,ref=${{ needs.prepare.outputs.image }}:cache-${{ matrix.platform }}
+          cache-to: type=registry,ref=${{ needs.prepare.outputs.image }}:cache-${{ matrix.platform }},mode=max
+          provenance: false
+          push: true
+          # DO NOT REMOVE `oci-mediatypes=true`, fixes annotation not showing up on the merged manifest
+          # ref: https://github.com/docker/build-push-action/discussions/1022
+          outputs: type=image,name=${{ needs.prepare.outputs.image }},name-canonical=true,push-by-digest=true,oci-mediatypes=true
+
+      - name: Export the Docker image digest
+        run: |
+          mkdir -p "${RUNNER_TEMP}"/digests
+          echo "${DIGEST#sha256:}" > "${RUNNER_TEMP}/digests/digest-${PLATFORM}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          PLATFORM: ${{ matrix.platform }}
+
+      - name: Upload the Docker image digest
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: digest-${{ matrix.platform }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    name: Merge multi-arch manifest & push image tags
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    permissions:
+      packages: write
+
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Download Docker image digests
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Log in to the container registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Merge and push Docker image
+        shell: bash
+        env:
+          BASE_TAG: ${{ needs.prepare.outputs.base_tag }}
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          DIGESTS_DIR: ${{ runner.temp }}/digests
+        run: |
+          set -euo pipefail
+
+          attempts=0
+          until docker buildx imagetools create \
+            --annotation "index:org.opencontainers.image.created=$(date -Iseconds)" \
+            --annotation "index:org.opencontainers.image.source=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --annotation "index:org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --annotation "index:org.opencontainers.image.version=custom-${BASE_TAG}" \
+            --tag "${IMAGE}:stable" \
+            --tag "${IMAGE}:custom-${BASE_TAG}" \
+            --tag "${IMAGE}:sha-${GITHUB_SHA}" \
+            "${IMAGE}@sha256:$(< "${DIGESTS_DIR}/digest-amd64")" \
+            "${IMAGE}@sha256:$(< "${DIGESTS_DIR}/digest-arm64")" \
+          ; do
+            attempts=$((attempts + 1))
+            if [[ $attempts -ge 3 ]]; then
+              echo "[$(date -u)] ERROR: Failed after 3 attempts." >&2
+              exit 1
+            fi
+            echo "Push failed (attempt $attempts). Retrying in $((2 ** attempts)) seconds..."
+            sleep $((2 ** attempts))
+          done
+
+  report:
+    name: Open an issue for a failed run
+    if: failure()
+    needs: [sync, prepare, ci, promote, build, merge]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    permissions:
+      issues: write
+
+    steps:
+      - name: Open an issue
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          title="Custom fork workflow failed on ${GITHUB_REF_NAME}"
+          if gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 200 --json title \
+            | jq --exit-status --arg title "$title" 'any(.[]; .title == $title)' > /dev/null; then
+            echo "An issue for ${GITHUB_REF_NAME} is already open."
+            exit 0
+          fi
+
+          gh issue create --repo "$GITHUB_REPOSITORY" --assignee "$GITHUB_REPOSITORY_OWNER" --title "$title" \
+            --body "The \`${GITHUB_WORKFLOW}\` run triggered by \`${GITHUB_EVENT_NAME}\` on \`${GITHUB_REF_NAME}\` (\`${GITHUB_SHA}\`) failed: ${RUN_URL}"
