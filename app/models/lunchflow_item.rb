@@ -155,6 +155,10 @@ class LunchflowItem < ApplicationRecord
     api_key.present?
   end
 
+  def custom_base_url?
+    effective_base_url != DEFAULT_BASE_URL
+  end
+
   def effective_base_url
     return DEFAULT_BASE_URL if base_url.blank?
 
