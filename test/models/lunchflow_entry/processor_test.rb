@@ -438,7 +438,7 @@ class LunchflowEntry::ProcessorTest < ActiveSupport::TestCase
     assert_equal BigDecimal("25.00"), result.amount
     assert_equal "Uber Trip", result.name
     assert_nil result.entryable.merchant, "Must not create a ProviderMerchant for a masked PAN"
-    assert_equal "474836xxxxxx6879 003015315475", result.notes
+    assert_nil result.notes
     assert_not result.entryable.pending?
   end
 
