@@ -156,22 +156,18 @@ class LunchflowEntry::Processor
       account.entries.exists?(external_id: external_id, source: "lunchflow")
     end
 
+    # The description is the transaction's title. Not falling back to the merchant: it is shown
+    # next to the name already, and "Unknown transaction" flags a transaction that needs a title.
     def name
       if unidentified_hold?
         HOLD_TRANSACTION_NAME
-      elsif masked_card_text?(data[:merchant]) && data[:description].present?
-        data[:description].to_s.strip
       else
-        data[:merchant].presence || "Unknown transaction"
+        data[:description].to_s.strip.presence || "Unknown transaction"
       end
     end
 
     def notes
-      if masked_card_text?(data[:merchant]) && data[:description].present?
-        data[:merchant].presence
-      else
-        data[:description].presence || (data[:merchant].presence if unidentified_hold?)
-      end
+      data[:description].presence || data[:merchant].presence if unidentified_hold?
     end
 
     def merchant
