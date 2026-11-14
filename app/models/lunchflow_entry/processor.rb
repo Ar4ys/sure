@@ -61,6 +61,7 @@ class LunchflowEntry::Processor
         date: date,
         name: name,
         source: "lunchflow",
+        category_id: category_id,
         merchant: merchant,
         notes: notes,
         extra: extra_metadata
@@ -168,6 +169,13 @@ class LunchflowEntry::Processor
 
     def notes
       data[:description].presence || data[:merchant].presence if unidentified_hold?
+    end
+
+    # categoryId is sent by bank-scraper, not by Lunch Flow. An id the family doesn't have gives nil,
+    # which leaves the entry's category as it is.
+    def category_id
+      id = data[:categoryId].presence
+      account.family.categories.where(id: id).pick(:id) if id
     end
 
     def merchant
