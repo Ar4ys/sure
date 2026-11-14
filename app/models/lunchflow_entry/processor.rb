@@ -195,11 +195,27 @@ class LunchflowEntry::Processor
           provider_merchant_id: "lunchflow_merchant_#{merchant_id}",
           name: merchant_name,
           source: "lunchflow"
-        )
+        ).tap { |found| apply_merchant_domain(found) if found }
       rescue ActiveRecord::RecordInvalid => e
         Rails.logger.error "LunchflowEntry::Processor - Failed to create merchant '#{merchant_name}': #{e.message}"
         nil
       end
+    end
+
+    # merchantDomain is sent by bank-scraper, not by Lunch Flow. It replaces the merchant's website,
+    # and a logo Sure generated from the old website follows the new one. Without it the merchant
+    # keeps its website.
+    def apply_merchant_domain(merchant)
+      domain = data[:merchantDomain].to_s.strip.presence
+      return unless domain
+
+      website = "https://#{domain}"
+      return if merchant.website_url == website
+
+      merchant.update!(website_url: website)
+      merchant.generate_logo_url_from_website!
+    rescue ActiveRecord::RecordInvalid => e
+      Rails.logger.warn "LunchflowEntry::Processor - Failed to set the website of merchant '#{merchant.name}': #{e.message}"
     end
 
     def amount
