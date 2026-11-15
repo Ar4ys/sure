@@ -167,8 +167,12 @@ class LunchflowEntry::Processor
       end
     end
 
+    # notes are sent by bank-scraper, not by Lunch Flow. Blank notes give nil, which leaves the entry's
+    # notes as they are.
     def notes
-      data[:description].presence || data[:merchant].presence if unidentified_hold?
+      return data[:description].presence || data[:merchant].presence if unidentified_hold?
+
+      data[:notes].to_s.strip.presence
     end
 
     # categoryId is sent by bank-scraper, not by Lunch Flow. An id the family doesn't have gives nil,
